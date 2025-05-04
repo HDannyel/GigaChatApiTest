@@ -1,76 +1,140 @@
 ﻿using GigaChatApiTest.GigaChatModels;
 using System;
-using System.Net.Http;
-using System.Net.Http.Headers;
+using System.IO;
+using System.Net;
 using System.Text;
-using System.Text.Encodings.Web;
 using System.Text.Json;
-using System.Threading.Tasks;
-using static System.Net.Mime.MediaTypeNames;
-using static System.Runtime.InteropServices.JavaScript.JSType;
 
 class Program
 {
-    private static readonly HttpClient client = new HttpClient();
-    private const string clientId = "ZTNiN2MzZjItYTA2Zi00YzgzLTlmMGEtNmQxNWViNGYyZjBhOmJkMjE1MWE2LWE5YTQtNDc4Ni04Mzg2LWJjNjNiYTY2NjQ3ZA==";
+    private const string ClientId = "ZTNiN2MzZjItYTA2Zi00YzgzLTlmMGEtNmQxNWViNGYyZjBhOmJkMjE1MWE2LWE5YTQtNDc4Ni04Mzg2LWJjNjNiYTY2NjQ3ZA==";
+    private const string UploadFileUrl = "https://gigachat.devices.sberbank.ru/api/v1/files";
+    private const string FilePath = @"C:\Users\danil\OneDrive\Рабочий стол\test.txt";
 
-    static async Task Main(string[] args)
+    static void Main(string[] args)
     {
         try
         {
-            var token = await GetAccessTokenAsync();
+            var token = GetAccessToken().Result;
             Console.WriteLine("Токен получен.");
 
-            var fileContent = File.ReadAllBytes("C:\\Users\\danil\\OneDrive\\Рабочий стол\\Документ Microsoft Word (2).txt");
-            var fileId = await UploadFile(token, "Документ Microsoft Word(2).txt", fileContent);
-            Console.WriteLine($"Id файла: {fileId}");
+            var fileId = UploadFile(token, File.ReadAllBytes(FilePath));
+            Console.WriteLine($"ID файла: {fileId}");
 
-            var response = await SendToGigaChatAsync(token);
+            var fileContent = GetFileContent(token, fileId);
+            Console.WriteLine("Содержимое файла получено:");
+
+            var response = SendToGigaChat(token, fileContent);
             Console.WriteLine("Ответ модели:");
             Console.WriteLine(response);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Ошибка: {ex.Message}");
+            Console.WriteLine("Ошибка:");
+            Console.WriteLine(ex.Message);
+        }
+
+        Console.WriteLine("Нажмите любую клавишу для выхода...");
+        Console.ReadKey();
+    }
+
+    static async Task<string> GetAccessToken()
+    {
+        var authHeaderValue = ClientId;
+        var content = "scope=GIGACHAT_API_PERS";
+
+        var request = (HttpWebRequest)WebRequest.Create("https://ngw.devices.sberbank.ru:9443/api/v2/oauth");
+        request.Method = "POST";
+        request.Headers.Add("Authorization", $"Basic {authHeaderValue}");
+        request.Headers.Add("RqUID", Guid.NewGuid().ToString());
+        request.ContentType = "application/x-www-form-urlencoded";
+
+        using (var requestStream = request.GetRequestStream())
+        {
+            byte[] contentBytes = Encoding.UTF8.GetBytes(content);
+            requestStream.Write(contentBytes, 0, contentBytes.Length);
+        }
+
+        using (var response = (HttpWebResponse)request.GetResponse())
+        using (var reader = new StreamReader(response.GetResponseStream()))
+        {
+            var responseBody = await reader.ReadToEndAsync();
+            var json = JsonDocument.Parse(responseBody);
+            return json.RootElement.GetProperty("access_token").GetString();
         }
     }
 
-    
-
-    static async Task<string> GetAccessTokenAsync()
+    static Guid UploadFile(string token, byte[] fileData)
     {
-        var authHeaderValue = clientId;
+        string boundary = Guid.NewGuid().ToString();
+        var request = (HttpWebRequest)WebRequest.Create(UploadFileUrl);
+        request.Method = "POST";
+        request.ContentType = "multipart/form-data; boundary=" + boundary;
+        request.Headers.Add("Authorization", "Bearer " + token);
+        request.Accept = "application/json";
 
-        // Создаем контент с правильным Content-Type
-        var content = new StringContent("scope=GIGACHAT_API_PERS", Encoding.UTF8, "application/x-www-form-urlencoded");
-
-        var request = new HttpRequestMessage(HttpMethod.Post, "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
+        using (var requestStream = request.GetRequestStream())
         {
-            Headers =
+            // Добавляем файл
+            string fileName = Path.GetFileName(FilePath);
+            WriteMultipartFormData(requestStream, boundary, "file", fileName, fileData);
+
+            // Добавляем purpose
+            WriteMultipartFormData(requestStream, boundary, "purpose", "general");
+
+            // Завершаем
+            WriteMultipartFormDataEnd(requestStream, boundary);
+        }
+
+        try
+        {
+            using (var response = (HttpWebResponse)request.GetResponse())
+            using (var reader = new StreamReader(response.GetResponseStream()))
             {
-                { "Authorization", $"Basic {authHeaderValue}" },
-                { "RqUID", Guid.NewGuid().ToString() }
-            },
-            Content = content // Content-Type теперь внутри content
-        };
-
-
-        //-H 'Content-Type: application/x-www-form-urlencoded' \
-        //-H 'Accept: application/json' \
-        //-H 'RqUID: <идентификатор_запроса>' \
-        //-H 'Authorization: Basic ключ_авторизации' \
-        //--data - urlencode 'scope=GIGACHAT_API_PERS'
-
-
-        var response = await client.SendAsync(request);
-        //response.EnsureSuccessStatusCode();
-
-        var responseBody = await response.Content.ReadAsStringAsync();
-        var json = JsonDocument.Parse(responseBody);
-        return json.RootElement.GetProperty("access_token").GetString();
+                var result = reader.ReadToEnd();
+                var uploadFileResponse = JsonSerializer.Deserialize<UploadFileResponse>(result);
+                return Guid.Parse(uploadFileResponse.id);
+            }
+        }
+        catch (WebException ex)
+        {
+            using var stream = ex.Response?.GetResponseStream();
+            using var reader = new StreamReader(stream);
+            var error = reader.ReadToEnd();
+            throw new Exception($"Ошибка загрузки файла: {error}");
+        }
     }
 
-    static async Task<string> SendToGigaChatAsync(string token)
+    static string GetFileContent(string token, Guid fileId)
+    {
+        string url = $"https://gigachat.devices.sberbank.ru/api/v1/files/{fileId}/content"; // Обратите внимание на /content
+
+        HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+        request.Method = "GET";
+        request.Accept = "application/json";
+        request.Headers.Add("Authorization", $"Bearer {token}");
+
+        try
+        {
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            using (Stream stream = response.GetResponseStream())
+            using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
+            {
+                return reader.ReadToEnd();
+            }
+        }
+        catch (WebException ex)
+        {
+            using (var stream = ex.Response?.GetResponseStream())
+            using (var reader = new StreamReader(stream, Encoding.UTF8))
+            {
+                string errorText = reader.ReadToEnd();
+                throw new Exception($"Ошибка сервера: {errorText}");
+            }
+        }
+    }
+
+    static string SendToGigaChat(string token, string fileContent)
     {
         var payload = new
         {
@@ -78,85 +142,75 @@ class Program
             messages = new[]
             {
                 new { role = "system", content = "Ты помощник, который отвечает на вопросы." },
-                new { role = "user", content = "Как работает эта модель?" }
+                new {
+                    role = "user",
+                    content = $"Какой ответ? \n\n{fileContent}"
+                }
             },
             temperature = 0.7,
-            max_tokens = 100
+            max_tokens = 500
         };
 
         var jsonPayload = JsonSerializer.Serialize(payload);
-        var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json"); // Content-Type здесь
+        var request = (HttpWebRequest)WebRequest.Create("https://gigachat.devices.sberbank.ru/api/v1/chat/completions");
+        request.Method = "POST";
+        request.Headers.Add("Authorization", "Bearer " + token);
+        request.ContentType = "application/json";
 
-        var request = new HttpRequestMessage(HttpMethod.Post, "https://gigachat.devices.sberbank.ru/api/v1/chat/completions")
+        using (var requestStream = request.GetRequestStream())
         {
-            Headers =
-            {
-                { "Authorization", $"Bearer {token}" }
-            },
-            Content = content // Content-Type теперь внутри content
-        };
-
-        var response = await client.SendAsync(request);
-        response.EnsureSuccessStatusCode();
-
-        var responseBody = await response.Content.ReadAsStringAsync();
-        var json = JsonDocument.Parse(responseBody);
-        return json.RootElement.GetProperty("choices")[0]
-                   .GetProperty("message")
-                   .GetProperty("content")
-                   .GetString();
-    }
-    //application/msword
-
-
-    static async Task<Guid> UploadFile(string token, string filename, byte[] body)
-    {
-
-        var requestUrl = "https://gigachat.devices.sberbank.ru/api/v1/files";
-
-        using (var client = new HttpClient())
-        {
-            // Установка заголовка авторизации
-            client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
-            client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-            // Подготовка данных формы
-            using (var content = new MultipartFormDataContent())
-            {
-                // Чтение файла
-                var fileStream = new FileStream("C:\\Users\\danil\\OneDrive\\Рабочий стол\\Документ Microsoft Word (2).txt", FileMode.Open, FileAccess.Read);
-                var fileContent = new StreamContent(fileStream);
-                fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-                content.Add(fileContent, "file", filename); // "file" - имя поля формы для файла
-
-
-
-                //var fileContent = new ByteArrayContent(body);
-                ////fileContent.Headers.ContentType = MediaTypeHeaderValue.Parse("text/plain");
-
-                //// Добавление файла в форму
-                //content.Add(fileContent, "file", filename);
-
-                // Добавление текстового параметра "purpose"
-                var purposeContent = new StringContent("general", Encoding.UTF8);
-                content.Add(purposeContent, "purpose");
-
-                // Отправка запроса
-                var response = await client.PostAsync(requestUrl, content);
-
-                // Проверка ответа
-                var responseBody = await response.Content.ReadAsStringAsync();
-                Console.WriteLine($"Status Code: {response.StatusCode}");
-                Console.WriteLine($"Response Body: {responseBody}");
-                var uploadFileResponse = JsonSerializer.Deserialize<UploadFileResponse>(responseBody);
-
-                return Guid.Parse(uploadFileResponse!.id);
-            }
+            byte[] jsonBytes = Encoding.UTF8.GetBytes(jsonPayload);
+            requestStream.Write(jsonBytes, 0, jsonBytes.Length);
         }
 
-  
-        //        curl - L - X POST 'https://gigachat.devices.sberbank.ru/api/v1/files' \
-        //-H 'Content-Type: multipart/form-data' \
-        //-H 'Accept: application/json' \
-        //-H 'Authorization: Bearer <TOKEN>'
+        try
+        {
+            using (var response = (HttpWebResponse)request.GetResponse())
+            using (var reader = new StreamReader(response.GetResponseStream()))
+            {
+                var responseBody = reader.ReadToEnd();
+                var json = JsonDocument.Parse(responseBody);
+                return json.RootElement.GetProperty("choices")[0]
+                           .GetProperty("message")
+                           .GetProperty("content")
+                           .GetString();
+            }
+        }
+        catch (WebException ex)
+        {
+            using var stream = ex.Response?.GetResponseStream();
+            using var reader = new StreamReader(stream);
+            var error = reader.ReadToEnd();
+            throw new Exception($"Ошибка запроса к модели: {error}");
+        }
+    }
+
+    // --- Вспомогательные методы для Multipart/Form-данных ---
+
+    static void WriteMultipartFormData(Stream stream, string boundary, string name, string value)
+    {
+        string header = $"\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n";
+        byte[] headerBytes = Encoding.UTF8.GetBytes(header);
+        byte[] valueBytes = Encoding.UTF8.GetBytes(value);
+
+        stream.Write(headerBytes, 0, headerBytes.Length);
+        stream.Write(valueBytes, 0, valueBytes.Length);
+    }
+
+    static void WriteMultipartFormData(Stream stream, string boundary, string name, string fileName, byte[] fileData)
+    {
+        string header = $"\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{fileName}\"\r\nContent-Type: text/plain\r\n\r\n";
+        byte[] headerBytes = Encoding.UTF8.GetBytes(header);
+
+        stream.Write(headerBytes, 0, headerBytes.Length);
+        stream.Write(fileData, 0, fileData.Length);
+    }
+
+    static void WriteMultipartFormDataEnd(Stream stream, string boundary)
+    {
+        string footer = $"\r\n--{boundary}--\r\n";
+        byte[] footerBytes = Encoding.UTF8.GetBytes(footer);
+        stream.Write(footerBytes, 0, footerBytes.Length);
     }
 }
+
