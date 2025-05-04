@@ -1,5 +1,6 @@
 ﻿using GigaChatApiTest.GigaChatModels;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Text;
@@ -10,6 +11,8 @@ class Program
     private const string ClientId = "ZTNiN2MzZjItYTA2Zi00YzgzLTlmMGEtNmQxNWViNGYyZjBhOmJkMjE1MWE2LWE5YTQtNDc4Ni04Mzg2LWJjNjNiYTY2NjQ3ZA==";
     private const string UploadFileUrl = "https://gigachat.devices.sberbank.ru/api/v1/files";
     private const string FilePath = @"C:\Users\danil\OneDrive\Рабочий стол\test.txt";
+
+   
 
     static void Main(string[] args)
     {
@@ -24,9 +27,40 @@ class Program
             var fileContent = GetFileContent(token, fileId);
             Console.WriteLine("Содержимое файла получено:");
 
-            var response = SendToGigaChat(token, fileContent);
+            // Инициализация истории сообщений
+            var messages = new List<ChatMessage>
+            {
+                new ChatMessage { role = "system", content = "Ты помощник, который отвечает на вопросы." },
+                new ChatMessage { role = "user", content = $"Ответ верный? \n\n{fileContent}" }
+            };
+
+            // Первый запрос к модели
+            var response = SendToGigaChat(token, messages);
             Console.WriteLine("Ответ модели:");
             Console.WriteLine(response);
+            messages.Add(new ChatMessage { role = "assistant", content = response });
+
+            // Цикл для продолжения диалога
+            while (true)
+            {
+                Console.Write("Вы: ");
+                string userMessage = Console.ReadLine();
+                if (userMessage.ToLower() == "exit")
+                    break;
+
+                messages.Add(new ChatMessage { role = "user", content = userMessage });
+
+                try
+                {
+                    string modelResponse = SendToGigaChat(token, messages);
+                    Console.WriteLine("Модель: " + modelResponse);
+                    messages.Add(new ChatMessage { role = "assistant", content = modelResponse });
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Ошибка при получении ответа от модели: " + ex.Message);
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -75,14 +109,9 @@ class Program
 
         using (var requestStream = request.GetRequestStream())
         {
-            // Добавляем файл
             string fileName = Path.GetFileName(FilePath);
             WriteMultipartFormData(requestStream, boundary, "file", fileName, fileData);
-
-            // Добавляем purpose
             WriteMultipartFormData(requestStream, boundary, "purpose", "general");
-
-            // Завершаем
             WriteMultipartFormDataEnd(requestStream, boundary);
         }
 
@@ -107,7 +136,7 @@ class Program
 
     static string GetFileContent(string token, Guid fileId)
     {
-        string url = $"https://gigachat.devices.sberbank.ru/api/v1/files/{fileId}/content"; // Обратите внимание на /content
+        string url = $"https://gigachat.devices.sberbank.ru/api/v1/files/{fileId}/content";
 
         HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
         request.Method = "GET";
@@ -134,19 +163,12 @@ class Program
         }
     }
 
-    static string SendToGigaChat(string token, string fileContent)
+    static string SendToGigaChat(string token, List<ChatMessage> messages)
     {
         var payload = new
         {
             model = "GigaChat",
-            messages = new[]
-            {
-                new { role = "system", content = "Ты помощник, который отвечает на вопросы." },
-                new {
-                    role = "user",
-                    content = $"Какой ответ? \n\n{fileContent}"
-                }
-            },
+            messages = messages.ToArray(),
             temperature = 0.7,
             max_tokens = 500
         };
@@ -186,7 +208,6 @@ class Program
     }
 
     // --- Вспомогательные методы для Multipart/Form-данных ---
-
     static void WriteMultipartFormData(Stream stream, string boundary, string name, string value)
     {
         string header = $"\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n";
@@ -213,4 +234,3 @@ class Program
         stream.Write(footerBytes, 0, footerBytes.Length);
     }
 }
-
